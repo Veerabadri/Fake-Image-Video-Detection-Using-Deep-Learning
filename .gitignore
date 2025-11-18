@@ -47,8 +47,8 @@ ENV/
 *.sqlite3
 signup.db
 
-# Model files (too large for GitHub - use Git LFS or store elsewhere)
-models/*.h5
+# Model files are tracked with Git LFS (see .gitattributes)
+# models/*.h5
 
 # Uploads and temporary files
 static/uploads/*
