@@ -48,7 +48,7 @@ ENV/
 signup.db
 
 # Model files are tracked with Git LFS (see .gitattributes)
-# models/*.h5
+# Don't ignore them - they're handled by Git LFS
 
 # Uploads and temporary files
 static/uploads/*
