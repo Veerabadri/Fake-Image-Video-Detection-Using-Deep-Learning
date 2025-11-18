@@ -181,6 +181,32 @@
 	</div>
 	<center>
 	<h1>For the given input result is {{result}}</h1>
+    {% if details %}
+    <div style="max-width:900px;margin:30px auto;background:#ffffffd9;padding:20px;border-radius:12px; text-align:left;">
+        <h3 style="margin-top:0;">Prediction Details</h3>
+        <p><strong>Input:</strong> {{details.filename}} ({{details.input_type|capitalize}})</p>
+        <p><strong>Confidence:</strong> {{details.confidence}}</p>
+        <p><strong>Probabilities:</strong> Real {{details.real_prob}} | Fake {{details.fake_prob}}</p>
+        {% if details.blur_score %}
+        <p><strong>Blur score:</strong> {{details.blur_score}} &nbsp;—&nbsp; {{details.quality_note}}</p>
+        {% elif details.avg_blur %}
+        <p><strong>Average blur score:</strong> {{details.avg_blur}} &nbsp;—&nbsp; {{details.quality_note}}</p>
+        {% else %}
+        <p><strong>Quality:</strong> {{details.quality_note}}</p>
+        {% endif %}
+        {% if details.frames_sampled %}
+        <p><strong>Frames analyzed:</strong> {{details.frames_sampled}} (faces detected: {{details.faces_extracted}})</p>
+        <p><strong>Frames flagged as suspicious:</strong> {{details.frames_flagged}}</p>
+        <p><strong>Fake probability variance:</strong> {{details.frame_prob_variance}}</p>
+        {% endif %}
+        {% if details.gradcam_url %}
+        <div style="margin-top:20px;">
+            <p><strong>Explainable AI view:</strong> highlighted regions contributed most to the decision.</p>
+            <img src="{{details.gradcam_url}}" alt="Grad-CAM explanation" style="max-width:100%;border-radius:8px;box-shadow:0 4px 10px rgba(0,0,0,0.2);" />
+        </div>
+        {% endif %}
+    </div>
+    {% endif %}
 </center>
 <footer class="footer">
 <div class="container">

@@ -1,11 +1,14 @@
 import tensorflow as tf
 import cv2
 import os
+import csv
+import datetime
 import numpy as np
 from PIL import Image, ImageChops, ImageEnhance
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.image import img_to_array, load_img
 from tensorflow.keras import backend as K
+from tensorflow.keras.layers import Conv2D
 from flask import Flask, render_template, request, redirect, send_file, url_for, Response
 from sklearn.metrics import f1_score
 from sklearn.metrics import recall_score
@@ -43,9 +46,15 @@ app = Flask(__name__)
 
 
 UPLOAD_FOLDER = 'static/uploads'
+EXPLANATION_FOLDER = os.path.join(UPLOAD_FOLDER, 'explanations')
+LOG_FOLDER = 'logs'
+PREDICTION_LOG = os.path.join(LOG_FOLDER, 'prediction_log.csv')
+
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(EXPLANATION_FOLDER, exist_ok=True)
+os.makedirs(LOG_FOLDER, exist_ok=True)
 
 # Initialize database
 def init_db():
@@ -80,6 +89,105 @@ FAKE_THRESHOLD = 0.50  # Average fake probability threshold
 FAKE_FRAME_THRESHOLD = 0.30  # Individual frame fake probability threshold (more sensitive)
 SUSPICIOUS_CONFIDENCE = 0.99  # If model is >99% confident, be more cautious
 CONFIDENCE_THRESHOLD = 0.95  # Flag if model is too confident (>95%) - might be suspicious
+
+def compute_blur_score(image):
+    """Return variance of Laplacian as blur score."""
+    if image is None:
+        return 0.0
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+def describe_confidence(fake_prob, real_prob):
+    """Return friendly confidence label."""
+    top_prob = max(fake_prob, real_prob)
+    if top_prob >= 0.9:
+        return "High"
+    if top_prob >= 0.75:
+        return "Moderate"
+    return "Low"
+
+def get_last_conv_layer_name(model):
+    """Find the last Conv2D layer name for Grad-CAM."""
+    for layer in reversed(model.layers):
+        if isinstance(layer, Conv2D):
+            return layer.name
+    return None
+
+def generate_gradcam_overlay(model, processed_array, original_bgr, filename_stub):
+    """
+    Generate Grad-CAM heatmap overlay for class index 1 (Fake).
+    Returns relative path to saved overlay or None if generation fails.
+    """
+    try:
+        last_conv = get_last_conv_layer_name(model)
+        if last_conv is None:
+            print("Grad-CAM skipped: no Conv2D layers found.")
+            return None
+
+        grad_model = tf.keras.models.Model(
+            [model.inputs], [model.get_layer(last_conv).output, model.output]
+        )
+        target_class_idx = 1  # Fake
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(processed_array)
+            loss = predictions[:, target_class_idx]
+        grads = tape.gradient(loss, conv_outputs)
+        if grads is None:
+            print("Grad-CAM skipped: gradients could not be computed.")
+            return None
+        pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+        conv_outputs = conv_outputs[0]
+        heatmap = tf.reduce_sum(tf.multiply(pooled_grads, conv_outputs), axis=-1)
+        heatmap = np.maximum(heatmap, 0)
+        max_val = np.max(heatmap)
+        if max_val == 0:
+            print("Grad-CAM skipped: heatmap max value is zero.")
+            return None
+        heatmap /= max_val
+        heatmap = heatmap.numpy()
+        heatmap = cv2.resize(heatmap, (original_bgr.shape[1], original_bgr.shape[0]))
+        heatmap = np.uint8(255 * heatmap)
+        heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        overlay = cv2.addWeighted(original_bgr, 0.6, heatmap, 0.4, 0)
+        save_path = os.path.join(
+            EXPLANATION_FOLDER, f"{filename_stub}_gradcam.jpg"
+        )
+        cv2.imwrite(save_path, overlay)
+        return save_path.replace("\\", "/")
+    except Exception as gradcam_error:
+        print(f"Grad-CAM generation failed: {gradcam_error}")
+        return None
+
+def log_prediction(entry):
+    """Append prediction details to CSV audit log."""
+    header = [
+        "timestamp",
+        "input_type",
+        "filename",
+        "result",
+        "fake_prob",
+        "real_prob",
+        "notes",
+    ]
+    file_exists = os.path.exists(PREDICTION_LOG)
+    try:
+        with open(PREDICTION_LOG, mode="a", newline="", encoding="utf-8") as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=header)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(
+                {
+                    "timestamp": datetime.datetime.utcnow().isoformat(),
+                    "input_type": entry.get("input_type"),
+                    "filename": entry.get("filename"),
+                    "result": entry.get("result"),
+                    "fake_prob": entry.get("fake_prob"),
+                    "real_prob": entry.get("real_prob"),
+                    "notes": entry.get("notes", ""),
+                }
+            )
+    except Exception as log_error:
+        print(f"Logging failed: {log_error}")
 
 def extract_face(frame):
     """
@@ -278,8 +386,9 @@ def predict_img():
             if not filename:
                 return render_template('index.html', error="No file selected")
             
+            details = None
             if model is None:
-                return render_template('display_image.html', result='Model not loaded. Please check server logs.')
+                return render_template('display_image.html', result='Model not loaded. Please check server logs.', details=details)
             
             input_shape = (128, 128, 3)
             pr_data = []
@@ -291,19 +400,27 @@ def predict_img():
             
             if filename.lower().endswith(('.png', '.jpg', '.jpeg')):
                 try:
+                    details = {
+                        "input_type": "image",
+                        "filename": filename,
+                    }
                     # Handle image upload
                     original = cv2.imread(file_path)
 
                     face_crop = extract_face(original)
                     if face_crop is not None:
-                        processed = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+                        inference_base = cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB)
+                        blur_score = compute_blur_score(face_crop)
                     else:
                         # fallback to center-cropped, resized image
                         pil_img = load_img(file_path, target_size=(150, 150))
-                        processed = img_to_array(pil_img)
-                        processed = cv2.resize(processed, (128, 128))
+                        inference_base = img_to_array(pil_img)
+                        inference_base = cv2.resize(inference_base, (128, 128))
+                        blur_score = compute_blur_score(original)
 
-                    processed = processed / 255.0
+                    inference_base = inference_base.astype("uint8")
+
+                    processed = inference_base / 255.0
                     processed = np.expand_dims(processed, axis=0)
                     
                     probs = model.predict(processed, verbose=0)
@@ -320,14 +437,49 @@ def predict_img():
                     else:
                         # Moderate confidence - use argmax
                         ans = 'Real' if result == 0 else 'Fake'
+                    quality_note = "Good face detail" if blur_score >= 50 else "Low face detail (may impact accuracy)"
+                    confidence_label = describe_confidence(fake_prob, real_prob)
+                    gradcam_path = generate_gradcam_overlay(
+                        model,
+                        processed,
+                        cv2.cvtColor(inference_base.astype(np.uint8), cv2.COLOR_RGB2BGR),
+                        os.path.splitext(filename)[0]
+                    )
+                    if gradcam_path:
+                        gradcam_url = "/" + gradcam_path
+                    else:
+                        gradcam_url = None
+
+                    details.update(
+                        {
+                            "fake_prob": round(fake_prob, 4),
+                            "real_prob": round(real_prob, 4),
+                            "confidence": confidence_label,
+                            "blur_score": round(blur_score, 2),
+                            "quality_note": quality_note,
+                            "gradcam_url": gradcam_url,
+                        }
+                    )
+                    log_prediction(
+                        {
+                            "input_type": "image",
+                            "filename": filename,
+                            "result": ans,
+                            "fake_prob": fake_prob,
+                            "real_prob": real_prob,
+                            "notes": quality_note,
+                        }
+                    )
                 except Exception as e:
                     print(f"Error processing image: {e}")
                     ans = f'Error processing image: {str(e)}'
+                    details = None
             else:
                 # Unsupported file type
                 ans = 'Unsupported file type. Please upload PNG, JPG, or JPEG images.'
+                details = None
 
-            return render_template('display_image.html', result=ans)
+            return render_template('display_image.html', result=ans, details=details)
 
     return render_template('index.html')
 
@@ -343,8 +495,9 @@ def predict_video():
             if not filename:
                 return render_template('index2.html', error="No file selected")
             
+            details = None
             if model is None:
-                return render_template('display_image.html', result='Model not loaded. Please check server logs.')
+                return render_template('display_image.html', result='Model not loaded. Please check server logs.', details=details)
             
             input_shape = (128, 128, 3)
             pr_data = []
@@ -355,6 +508,10 @@ def predict_video():
 
             if filename.lower().endswith(('.mp4', '.avi', '.mkv')):
                 try:
+                    details = {
+                        "input_type": "video",
+                        "filename": filename,
+                    }
                     # Handle video upload
                     cap = cv2.VideoCapture(file_path)
                     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -369,6 +526,7 @@ def predict_video():
                     
                     frames = []
                     faces_extracted = 0
+                    frame_blurs = []
                     
                     for idx in frame_indices:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
@@ -379,16 +537,19 @@ def predict_video():
                         face = extract_face(frame)
                         if face is not None:
                             frames.append(face)
+                            frame_blurs.append(compute_blur_score(face))
                             faces_extracted += 1
                         else:
                             # Fallback: resize full frame
                             resized = cv2.resize(frame, (128, 128))
                             frames.append(resized)
+                            frame_blurs.append(compute_blur_score(resized))
 
                     cap.release()
 
                     if len(frames) == 0:
                         ans = 'Error: Could not process frames from video.'
+                        details = None
                     else:
                         # Convert frames to numpy array
                         video_data = np.array(frames) / 255.0
@@ -487,14 +648,62 @@ def predict_video():
                             else:
                                 ans = 'Real'
                             print(f"Decision: {ans} (moderate confidence, majority vote)")
+
+                        confidence_label = describe_confidence(fake_prob, real_prob)
+                        avg_blur = float(np.mean(frame_blurs)) if frame_blurs else 0.0
+                        quality_note = "Frame quality OK" if avg_blur >= 40 else "Low frame detail (motion blur)"
+
+                        gradcam_url = None
+                        try:
+                            max_idx = int(np.argmax(predictions[:, 1]))
+                            processed_frame = np.expand_dims(video_data[max_idx], axis=0)
+                            gradcam_path = generate_gradcam_overlay(
+                                model,
+                                processed_frame,
+                                frames[max_idx],
+                                f"{os.path.splitext(filename)[0]}_frame{max_idx}"
+                            )
+                            if gradcam_path:
+                                gradcam_url = "/" + gradcam_path
+                        except Exception as gradcam_video_err:
+                            print(f"Video Grad-CAM failed: {gradcam_video_err}")
+
+                        details.update(
+                            {
+                                "fake_prob": round(fake_prob, 4),
+                                "real_prob": round(real_prob, 4),
+                                "confidence": confidence_label,
+                                "frames_sampled": len(frames),
+                                "faces_extracted": faces_extracted,
+                                "frames_flagged": int(frames_above_frame_threshold),
+                                "max_fake_prob": round(max_fake_prob, 4),
+                                "quality_note": quality_note,
+                                "avg_blur": round(avg_blur, 2),
+                                "gradcam_url": gradcam_url,
+                                "frame_prob_variance": round(prob_variance, 6),
+                            }
+                        )
+
+                        log_prediction(
+                            {
+                                "input_type": "video",
+                                "filename": filename,
+                                "result": ans,
+                                "fake_prob": fake_prob,
+                                "real_prob": real_prob,
+                                "notes": f"{quality_note}; frames_flagged={frames_above_frame_threshold}",
+                            }
+                        )
                 except Exception as e:
                     print(f"Error processing video: {e}")
                     ans = f'Error processing video: {str(e)}'
+                    details = None
             else:
                 # Unsupported file type
                 ans = 'Unsupported file type. Please upload MP4, AVI, or MKV videos.'
+                details = None
 
-            return render_template('display_image.html', result=ans)
+            return render_template('display_image.html', result=ans, details=details)
 
     return render_template('index2.html')    
 

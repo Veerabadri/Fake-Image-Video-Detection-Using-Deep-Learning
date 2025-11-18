@@ -53,6 +53,7 @@ signup.db
 # Uploads and temporary files
 static/uploads/*
 !static/uploads/.gitkeep
+!static/uploads/explanations/.gitkeep
 output/
 *.mp4
 *.avi
@@ -66,6 +67,8 @@ desktop.ini
 
 # Logs
 *.log
+logs/*
+!logs/.gitkeep
 
 # Environment variables
 .env
