@@ -1,0 +1,76 @@
+# Dataset folders (exclude from GitHub)
+data/
+Dataset-2/
+Dataset-3/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+signup.db
+
+# Model files (if too large, uncomment to exclude)
+# models/
+
+# Uploads and temporary files
+static/uploads/*
+!static/uploads/.gitkeep
+output/
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Environment variables
+.env
+.env.local
+
+# Large wheel files
+*.whl
+

@@ -1,0 +1,9 @@
+tensorflow
+opencv-python
+opencv-contrib-python
+pillow
+scikit-learn
+flask
+numpy
+markupsafe
+werkzeug
